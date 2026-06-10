@@ -34,244 +34,261 @@ app.get('/', (req, res) => {
 
 
 // ==========================================
-// REGISTRATION ENDPOINT
+// REGISTRATION ENDPOINT (8-COLUMN COMPLIANT SCHEMA)
 // ==========================================
 app.post('/api/register', async (req, res) => {
-  const userData = req.body;
+  const { username, password, nameOfUser, userType, department, contactNumber } = req.body;
+
   try {
-    const hashedPassword = await bcrypt.hash(userData.password, 10);
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
-    const newRow = [
-      [
-        userData.email,
-        hashedPassword, 
-        userData.nameOfUser,
-        userData.userType || 'Regular User', 
-        userData.department,
-        userData.nameOfEndUser,
-        userData.contactNumber,
-        new Date().toLocaleString(),
-        'Pending' 
-      ]
-    ];
+    // Query column A specifically to check for duplicates safely
+    const getRows = await googleSheets.spreadsheets.values.get({
+      auth,
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Users!A:A",
+    });
+
+    const rows = getRows.data.values || [];
+    const userExists = rows.some(row => row[0] && row[0].toString().trim().toLowerCase() === String(username).trim().toLowerCase());
+
+    if (userExists) {
+      return res.status(400).json({ message: "Email address username already exists in portal registry." });
+    }
+
+    // Hash the password cleanly via bcrypt
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Save user to the "Users" sheet using your exact 8-column layout arrangement order
+    const newUserRecordRow = [[
+      username,                   // Col A: Email Address
+      hashedPassword,             // Col B: Password
+      nameOfUser || '',           // Col C: Name of User
+      userType || '',             // Col D: Type of User
+      department || '',           // Col E: Department/Office
+      contactNumber || '',        // Col F: Contact Number
+      new Date().toLocaleString(),// Col G: Timestamp
+      'Active'                    // Col H: Status
+    ]];
 
     await googleSheets.spreadsheets.values.append({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Sheet1", 
+      range: "Users!A:E", // Appending to A:E automatically expands row widths safely
       valueInputOption: "USER_ENTERED",
-      resource: { values: newRow },
+      resource: { values: newUserRecordRow },
     });
 
-    res.status(200).json({ message: "Registration successful! Mapped into pending administrator verification loop." });
+    res.status(201).json({ message: "User registered successfully!" });
   } catch (error) {
-    res.status(500).json({ message: "Failed to save data." });
+    console.error("Account registration internal crash:", error);
+    res.status(500).json({ message: "Internal server error." });
   }
 });
 
 
 // ==========================================
-// LOGIN ENDPOINT
+// LOGIN ENDPOINT (BOUNDED RANGE SAFETY CHECK)
 // ==========================================
 app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { username, password } = req.body;
+
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({
+
+    // Fetch bounding columns A:E safely to guarantee execution independent of grid widths
+    const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Sheet1!A:I", 
+      range: "Users!A:E",
     });
 
-    const rows = response.data.values;
-    if (!rows || rows.length === 0) {
-      return res.status(401).json({ message: "No users found." });
-    }
-
-    let userRow = null;
-    let passwordMatches = false;
-
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i][0] && rows[i][0].trim().toLowerCase() === email.trim().toLowerCase()) {
-        if (!rows[i][1]) break;
-        passwordMatches = await bcrypt.compare(password, rows[i][1]);
-        if (passwordMatches) userRow = rows[i];
-        break; 
-      }
-    }
+    const rows = getRows.data.values || [];
+    const userRow = rows.find(row => row[0] && row[0].toString().trim().toLowerCase() === String(username).trim().toLowerCase());
 
     if (!userRow) {
-      return res.status(401).json({ message: "Invalid credentials." });
+      return res.status(400).json({ message: "Invalid username or password configuration." });
     }
 
-    const accountStatus = (userRow[8] || 'Pending').trim().toLowerCase();
-    if (accountStatus !== 'approved') {
-      if (accountStatus === 'rejected') {
-        return res.status(403).json({ message: "Access Denied: Your account registration has been rejected by an administrator." });
-      }
-      return res.status(403).json({ message: "Access Mapped: Your registration is currently pending administrator review and approval." });
+    // De-structure baseline parameters from rows securely
+    const [storedUsername, storedHashedPassword, nameOfUser, userType, department] = userRow;
+
+    // Compare passwords securely using bcrypt engine hashes
+    const isPasswordValid = await bcrypt.compare(password, storedHashedPassword);
+
+    if (!isPasswordValid) {
+      return res.status(400).json({ message: "Invalid username or password configuration." });
     }
 
-    res.status(200).json({ 
-      message: "Login successful!", 
-      user: {
-        email: userRow[0],
-        nameOfUser: userRow[2],
-        userType: userRow[3],
-        department: userRow[4],
-        nameOfEndUser: userRow[5],
-        contactNumber: userRow[6]
-      } 
+    // Successful login response
+    res.status(200).json({
+      message: "Login successful!",
+      user: { 
+        username: storedUsername, 
+        department, 
+        userType,
+        nameOfUser
+      },
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to connect to database." });
+    console.error("Login verification checkpoint crashed:", error);
+    res.status(500).json({ message: "Internal server error." });
   }
 });
 
+// ==========================================
+// ACCOUNTS MANAGEMENT SYSTEM ENDPOINTS
+// ==========================================
 
-// ====================================================================
-// ADMINISTRATIVE ENDPOINTS: ACCOUNTS ACCESS AUDIT AND LIFECYCLE
-// ====================================================================
-
+// 1. GET ALL REGISTERED ACCOUNT USERS
 app.get('/api/users', async (req, res) => {
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({
+
+    const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Sheet1!A:I" 
+      range: "Users!A:E",
     });
 
-    const rows = response.data.values;
-    if (!rows || rows.length <= 1) return res.status(200).json([]);
-
-    const formattedUsers = rows.slice(1).map((row) => ({
-      email: row[0] || '',
+    const rows = getRows.data.values || [];
+    
+    // Skip header row if it exists, map clean records back
+    const formattedUsers = rows.slice(1).map((row, index) => ({
+      id: index + 2, 
+      username: row[0] || '',
       nameOfUser: row[2] || '',
-      userType: row[3] || 'Regular User',
-      department: row[4] || '',
-      nameOfEndUser: row[5] || '',
-      contactNumber: row[6] || '',
-      timestamp: row[7] || '',
-      status: row[8] || 'Pending' 
+      userType: row[3] || '',
+      department: row[4] || ''
     }));
 
     res.status(200).json(formattedUsers);
   } catch (error) {
-    console.error("Error reading accounts directory table:", error);
-    res.status(500).json({ message: "Failed to load system user directories." });
+    console.error("Failed to load user accounts ledger map profile context:", error);
+    res.status(500).json({ message: "Database lookup failure." });
   }
 });
 
+// 2. FORCE OVERRIDE UPDATE EXECUTING ON USER ACCOUNT
 app.post('/api/users/update', async (req, res) => {
-  const { email, userType, department, status } = req.body;
+  const { originalUsername, updatedUser } = req.body;
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "Sheet1!A:I" });
-    const rows = response.data.values;
 
-    let targetRowIndex = -1;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i][0] && rows[i][0].trim().toLowerCase() === email.trim().toLowerCase()) {
-        targetRowIndex = i + 1; 
+    const getRows = await googleSheets.spreadsheets.values.get({
+      auth,
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Users!A:A",
+    });
+    const rows = getRows.data.values || [];
+    
+    let sheetTargetLineIndex = -1;
+    for(let i=0; i<rows.length; i++) {
+      if(rows[i][0] === originalUsername) {
+        sheetTargetLineIndex = i + 1; 
         break;
       }
     }
 
-    if (targetRowIndex === -1) return res.status(404).json({ message: "User account identifier profile not found." });
+    if(sheetTargetLineIndex === -1) return res.status(404).json({ message: "Target account registry item context lost." });
 
-    while (rows[targetRowIndex - 1].length < 9) {
-      rows[targetRowIndex - 1].push('');
-    }
-
-    rows[targetRowIndex - 1][3] = userType;
-    rows[targetRowIndex - 1][4] = department;
-    rows[targetRowIndex - 1][8] = status || rows[targetRowIndex - 1][8] || 'Pending'; 
-
-    await googleSheets.spreadsheets.values.update({
-      auth,
-      spreadsheetId: SPREADSHEET_ID,
-      range: `Sheet1!A${targetRowIndex}:I${targetRowIndex}`, 
-      valueInputOption: "USER_ENTERED",
-      resource: { values: [rows[targetRowIndex - 1]] }
-    });
-
-    res.status(200).json({ message: "User credentials and status flags saved successfully." });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Failed to adjust user specifications." });
-  }
-});
-
-app.post('/api/users/delete', async (req, res) => {
-  const { email } = req.body;
-  try {
-    const client = await auth.getClient();
-    const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "Sheet1!A:I" });
-    let rows = response.data.values;
-
-    if (!rows) return res.status(404).json({ message: "Database user sheet is completely empty." });
-
-    const initialLength = rows.length;
-    rows = rows.filter(row => row[0] && row[0].trim().toLowerCase() !== email.trim().toLowerCase());
-
-    if (rows.length === initialLength) return res.status(404).json({ message: "Target account registry key does not exist." });
-
-    await googleSheets.spreadsheets.values.clear({ auth, spreadsheetId: SPREADSHEET_ID, range: "Sheet1!A2:I1000" });
-
-    if (rows.length > 1) {
-      await googleSheets.spreadsheets.values.update({
-        auth, spreadsheetId: SPREADSHEET_ID, range: `Sheet1!A1:I${rows.length}`,
-        valueInputOption: "USER_ENTERED", resource: { values: rows }
-      });
-    }
-
-    res.status(200).json({ message: "Account cleanly wiped from system tracking matrix." });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to execute database account truncation." });
-  }
-});
-
-
-// ==========================================
-// LDIP ROUTE MAP CONTROLLERS
-// ==========================================
-app.post('/api/ldip', async (req, res) => {
-  const entryData = req.body;
-  try {
-    const client = await auth.getClient();
-    const googleSheets = google.sheets({ version: "v4", auth: client });
-
-    const newLdipRow = [
-      [
-        entryData.office,
-        entryData.sectorCode,
-        entryData.sectorName,
-        entryData.title,
-        entryData.description,
-        entryData.targets.join(', '), 
-        entryData.budget,
-        entryData.timestamp
-      ]
+    // Compile values block array matching schema adjustments
+    const cellValuePayload = [
+      updatedUser.username, 
+      updatedUser.password || '', 
+      updatedUser.nameOfUser || '',
+      updatedUser.userType || '',
+      updatedUser.department || ''
     ];
 
+    await googleSheets.spreadsheets.values.update({
+      auth, spreadsheetId: SPREADSHEET_ID,
+      range: `Users!A${sheetTargetLineIndex}:E${sheetTargetLineIndex}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [cellValuePayload] }
+    });
+
+    res.status(200).json({ message: "Account profile successfully overwritten inside data stream mapping registry." });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to push network write action to user record sheet." });
+  }
+});
+
+// 3. DROPS TARGET USER ACCOUNT PERMANENTLY FROM DIRECTORY
+app.post('/api/users/delete', async (req, res) => {
+  const { username } = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+
+    const getRows = await googleSheets.spreadsheets.values.get({
+      auth, spreadsheetId: SPREADSHEET_ID, range: "Users!A:A"
+    });
+    const rows = getRows.data.values || [];
+
+    let targetDeleteLineIndex = -1;
+    for(let i=0; i<rows.length; i++) {
+      if(rows[i][0] === username) {
+        targetDeleteLineIndex = i; 
+        break;
+      }
+    }
+
+    if(targetDeleteLineIndex === -1) return res.status(404).json({ message: "Account context pointer not found." });
+
+    const meta = await googleSheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetId = meta.data.sheets.find(s => s.properties.title === "Users")?.properties.sheetId;
+
+    await googleSheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      resource: {
+        requests: [{
+          deleteDimension: {
+            range: { sheetId: sheetId, dimension: "ROWS", startIndex: targetDeleteLineIndex, endIndex: targetDeleteLineIndex + 1 }
+          }
+        }]
+      }
+    });
+
+    res.status(200).json({ message: "User securely disconnected from directory schema." });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Critical authorization intercept failure on deletion process script." });
+  }
+});
+
+
+// ==========================================
+// LDIP LEDGER ENDPOINTS
+// ==========================================
+app.post('/api/ldip', async (req, res) => {
+  const { office, sectorCode, sectorName, title, description, targets, budget } = req.body;
+
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+
+    const timestamp = new Date().toLocaleString();
+
+    // Append entry to "LDIP" sheet
     await googleSheets.spreadsheets.values.append({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "LDIP!A:H", 
+      range: "LDIP!A:H",
       valueInputOption: "USER_ENTERED",
-      resource: { values: newLdipRow },
+      resource: {
+        values: [[office, sectorCode, sectorName, title, description, targets.join(', '), budget, timestamp]],
+      },
     });
 
-    res.status(200).json({ message: "LDIP entry synchronized successfully!" });
+    res.status(201).json({ message: "LDIP entry saved successfully!" });
   } catch (error) {
-    res.status(500).json({ message: "Failed to commit record entry." });
+    console.error(error);
+    res.status(500).json({ message: "Internal server error." });
   }
 });
 
@@ -285,10 +302,13 @@ app.get('/api/ldip/:department', async (req, res) => {
 
     if (!rows || rows.length <= 1) return res.status(200).json([]);
 
+    const cleanDept = String(department).trim().toLowerCase();
+
     const filteredEntries = rows.slice(1)
       .filter(row => {
-        if (!row[0] || department.trim().toLowerCase() === 'all') return true;
-        return row[0].toString().trim().toLowerCase() === department.trim().toLowerCase();
+        if (!row || !row[0]) return false;
+        if (cleanDept === 'all') return true;
+        return row[0].toString().trim().toLowerCase() === cleanDept;
       })
       .map((row, index) => ({
         id: index,
@@ -297,16 +317,117 @@ app.get('/api/ldip/:department', async (req, res) => {
         sectorName: row[2] || 'Unassigned',
         title: row[3] || 'Untitled Program',
         description: row[4] || '',
-        targets: row[5] ? row[5].split(', ') : [], 
+        targets: (row[5] !== undefined && row[5] !== null) ? String(row[5]).split(', ') : [], 
         budget: cleanParseFloat(row[6]), 
         timestamp: row[7] || ''
       }));
 
     res.status(200).json(filteredEntries.reverse());
   } catch (error) {
-    res.status(500).json({ message: "Failed to retrieve records from cloud ledger." });
+    console.error("Backend Error in GET /api/ldip/:department:", error);
+    res.status(500).json({ message: "Failed to retrieve records from cloud ledger.", error: error.toString() });
   }
 });
+
+// LOCAL CONTROL: UPDATE AN EXISTING LDIP ROW ENTRY IN THE SPREADSHEET
+app.post('/api/ldip/update', async (req, res) => {
+  const { originalOffice, originalTitle, originalTimestamp, updatedEntry } = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "LDIP!A:H" });
+    const rows = response.data.values || [];
+
+    let targetRowIndex = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (
+        rows[i][0] === originalOffice &&
+        rows[i][3] === originalTitle &&
+        rows[i][7] === originalTimestamp
+      ) {
+        targetRowIndex = i + 1; 
+        break;
+      }
+    }
+
+    if (targetRowIndex === -1) return res.status(404).json({ message: "Target LDIP record layout not found." });
+
+    const updatedRow = [
+      updatedEntry.office,
+      updatedEntry.sectorCode,
+      updatedEntry.sectorName,
+      updatedEntry.title,
+      updatedEntry.description,
+      updatedEntry.targets.join(', '),
+      updatedEntry.budget,
+      originalTimestamp 
+    ];
+
+    await googleSheets.spreadsheets.values.update({
+      auth,
+      spreadsheetId: SPREADSHEET_ID,
+      range: `LDIP!A${targetRowIndex}:H${targetRowIndex}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [updatedRow] }
+    });
+
+    res.status(200).json({ message: "LDIP entry updated successfully inside cloud ledger." });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update LDIP spreadsheet row." });
+  }
+});
+
+app.post('/api/ldip/delete', async (req, res) => {
+  const { office, title, timestamp } = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+    
+    const response = await googleSheets.spreadsheets.values.get({ 
+      auth, 
+      spreadsheetId: SPREADSHEET_ID, 
+      range: "LDIP!A:H" 
+    });
+    const rows = response.data.values || [];
+
+    let targetIndex = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] === office && rows[i][3] === title && rows[i][7] === timestamp) {
+        targetIndex = i; 
+        break;
+      }
+    }
+
+    if (targetIndex === -1) {
+      return res.status(404).json({ message: "Record index coordinates not found in sheet." });
+    }
+
+    const meta = await googleSheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetId = meta.data.sheets.find(s => s.properties.title === "LDIP")?.properties.sheetId;
+
+    await googleSheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      resource: {
+        requests: [{
+          deleteDimension: {
+            range: { 
+              sheetId: sheetId, 
+              dimension: "ROWS", 
+              startIndex: targetIndex, 
+              endIndex: targetIndex + 1 
+            }
+          }
+        }]
+      }
+    });
+
+    res.status(200).json({ message: "Success! Row deleted and shifted up locally." });
+  } catch (error) {
+    console.error("Local Delete Error Details:", error);
+    res.status(500).json({ message: "Failed to clear and shift target spreadsheet row locally." });
+  }
+});
+
 
 // CORE ROUTE: GENERATES RIGID FORMAT [Office Code]-[Program].[Project].[Activity] CODES FOR ALL ROWS
 app.post('/api/ldip/import', async (req, res) => {
@@ -322,7 +443,6 @@ app.post('/api/ldip/import', async (req, res) => {
     // --- STEP 1: POPULATE GRANULAR ACTIVITIES TO THE LIVE AIP SHEET (AIP!A:R) ---
     const aipRange = 'AIP!A:R';
     const aipRowsToAppend = rows.map(row => {
-      // EXPLICIT INSTRUCTION 1 & 2: Combines the full Office Code matrix strictly from row payload variables
       const masterOfficePrefix = row.officeCode || '3000-000-3-3-11';
       const generatedRefCode = `${masterOfficePrefix}-${row.programId || '0'}.${row.projectId || '0'}.${row.activityId || '0'}`;
 
@@ -404,56 +524,40 @@ app.post('/api/ldip/import', async (req, res) => {
       });
     }
 
-    res.status(200).json({ message: "Successfully executed dual matrix sync parameters." });
+    res.status(200).json({ message: "Success! Balanced row sets integrated.", addedCount: rows.length });
   } catch (error) {
-    console.error("Critical error encountered during batch Excel parsing:", error);
-    res.status(500).json({ message: "Internal server error syncing bulk dataset to Google ledger." });
+    console.error("Integration Matrix Failure Intercept:", error);
+    res.status(500).json({ message: "Critical error compiling relational spreadsheets maps pointers data sets." });
   }
 });
 
 
 // ==========================================
-// AIP ROUTE MAP CONTROLLERS
+// AIP SYSTEM LEDGER ENDPOINTS
 // ==========================================
 app.post('/api/aip', async (req, res) => {
-  const { entries } = req.body;
+  const { aipRefCode, office, programTitle, projectName, activityName, startingDate, completionDate, expectedOutput, fundingSource, ps, mooe, co, total } = req.body;
+
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
-    const aipRows = entries.map(entry => [
-      entry.aipRefCode,                       
-      entry.office,                           
-      entry.programTitle,                     
-      entry.projectName,                      
-      entry.activityName || 'N/A (Standalone Project)', 
-      entry.implementingOffice,               
-      entry.startDate,                        
-      entry.completionDate,                   
-      entry.expectedOutput,                   
-      entry.fundingSource,                    
-      entry.ps,                               
-      entry.mooe,                             
-      entry.co,                               
-      entry.total,                            
-      entry.ccAdaptation,                     
-      entry.ccMitigation,                     
-      entry.ccTypology,                       
-      new Date().toLocaleString()             
-    ]);
+    const timestamp = new Date().toLocaleString();
 
     await googleSheets.spreadsheets.values.append({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "AIP!A:R", 
+      range: "AIP!A:N",
       valueInputOption: "USER_ENTERED",
-      resource: { values: aipRows },
+      resource: {
+        values: [[aipRefCode, office, programTitle, projectName, activityName, startingDate, completionDate, expectedOutput, fundingSource, ps, mooe, co, total, timestamp]],
+      },
     });
 
-    res.status(200).json({ message: "AIP entries synchronized successfully!" });
+    res.status(201).json({ message: "AIP item saved successfully!" });
   } catch (error) {
-    console.error("Error writing to AIP tab:", error);
-    res.status(500).json({ message: "Failed to sync AIP dataset rows." });
+    console.error(error);
+    res.status(500).json({ message: "Internal server error." });
   }
 });
 
@@ -467,10 +571,13 @@ app.get('/api/aip/:department', async (req, res) => {
 
     if (!rows || rows.length <= 1) return res.status(200).json([]);
 
+    const cleanDept = String(department).trim().toLowerCase();
+
     const filteredEntries = rows.slice(1)
       .filter(row => {
-        if (!row[1] || department.trim().toLowerCase() === 'all') return true;
-        return row[1].toString().trim().toLowerCase() === department.trim().toLowerCase();
+        if (!row || !row[1]) return false;
+        if (cleanDept === 'all') return true;
+        return row[1].toString().trim().toLowerCase() === cleanDept;
       }) 
       .map((row, index) => ({
         id: index,
@@ -496,8 +603,8 @@ app.get('/api/aip/:department', async (req, res) => {
 
     res.status(200).json(filteredEntries.reverse());
   } catch (error) {
-    console.error("Error reading from AIP tab:", error);
-    res.status(500).json({ message: "Failed to retrieve records from cloud ledger." });
+    console.error("Backend Error in GET /api/aip/:department:", error);
+    res.status(500).json({ message: "Failed to retrieve records from cloud ledger.", error: error.toString() });
   }
 });
 
@@ -558,6 +665,57 @@ app.post('/api/aip/update', async (req, res) => {
   }
 });
 
+app.post('/api/aip/delete', async (req, res) => {
+  const { aipRefCode } = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+    
+    const response = await googleSheets.spreadsheets.values.get({ 
+      auth, 
+      spreadsheetId: SPREADSHEET_ID, 
+      range: "AIP!A:A" 
+    });
+    const rows = response.data.values || [];
+
+    let targetIndex = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] && rows[i][0].toString().trim().toLowerCase() === String(aipRefCode).trim().toLowerCase()) {
+        targetIndex = i; 
+        break;
+      }
+    }
+
+    if (targetIndex === -1) {
+      return res.status(404).json({ message: "AIP reference code index coordinate not found." });
+    }
+
+    const meta = await googleSheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetId = meta.data.sheets.find(s => s.properties.title === "AIP")?.properties.sheetId;
+
+    await googleSheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      resource: {
+        requests: [{
+          deleteDimension: {
+            range: { 
+              sheetId: sheetId, 
+              dimension: "ROWS", 
+              startIndex: targetIndex, 
+              endIndex: targetIndex + 1 
+            }
+          }
+        }]
+      }
+    });
+
+    res.status(200).json({ message: "Success! Row deleted and shifted up locally." });
+  } catch (error) {
+    console.error("Local AIP Delete Error Details:", error);
+    res.status(500).json({ message: "Failed to clear and shift target AIP spreadsheet row locally." });
+  }
+});
+
 
 // ==========================================
 // ANNUAL BUDGET (LBF NO. 4) CONTROLLERS
@@ -581,22 +739,22 @@ app.post('/api/budget', async (req, res) => {
       entry.mooe,                 
       entry.co,                   
       entry.total,                
-      entry.includesProcurement || 'No', 
-      new Date().toLocaleString()        
+      entry.includesProcurement,  
+      new Date().toLocaleString() 
     ]];
 
     await googleSheets.spreadsheets.values.append({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "BudgetForm4!A:M", 
+      range: "BudgetForm4!A:N",
       valueInputOption: "USER_ENTERED",
       resource: { values: newBudgetRow },
     });
 
-    res.status(200).json({ message: "Annual budget row synchronized with Local Budget Form No. 4 ledger!" });
+    res.status(201).json({ message: "Budget allocation logged successfully!" });
   } catch (error) {
-    console.error("Error writing to BudgetForm4 tab:", error);
-    res.status(500).json({ message: "Failed to execute database logging for Form 4." });
+    console.error(error);
+    res.status(500).json({ message: "Internal server error." });
   }
 });
 
@@ -610,10 +768,13 @@ app.get('/api/budget/:department', async (req, res) => {
 
     if (!rows || rows.length <= 1) return res.status(200).json([]);
 
+    const cleanDept = String(department).trim().toLowerCase();
+
     const filteredEntries = rows.slice(1)
       .filter(row => {
-        if (!row[1] || department.trim().toLowerCase() === 'all') return true;
-        return row[1].toString().trim().toLowerCase() === department.trim().toLowerCase();
+        if (!row || !row[1]) return false;
+        if (cleanDept === 'all') return true;
+        return row[1].toString().trim().toLowerCase() === cleanDept;
       })
       .map((row, index) => ({
         id: index,
@@ -636,95 +797,259 @@ app.get('/api/budget/:department', async (req, res) => {
     res.status(200).json(filteredEntries.reverse());
   } catch (error) {
     console.error("Error fetching Form 4 budget ledger rows:", error);
-    res.status(500).json({ message: "Failed to read data matrix from spreadsheet." });
+    res.status(500).json({ message: "Failed to read data matrix from spreadsheet.", error: error.toString() });
   }
 });
 
-
-// ==========================================
-// PPMP ROUTE MAP CONTROLLERS
-// ==========================================
-app.post('/api/ppmp', async (req, res) => {
-  const { entries } = req.body;
+app.post('/api/budget/update', async (req, res) => {
+  const { originalRefCode, updatedEntry } = req.body;
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
-
-    const ppmpRows = entries.map(entry => [
-      entry.aipRefCode,              
-      entry.office,                  
-      entry.generalDescription,      
-      entry.typeOfProject,           
-      entry.preProcurementConference,
-      entry.startProcurementMonth,   
-      entry.endProcurementMonth,     
-      entry.expectedDeliveryMonth,   
-      entry.sourceOfFunds,           
-      entry.estimatedBudget,         
-      JSON.stringify(entry.items || []), 
-      new Date().toLocaleString()    
-    ]);
-
-    await googleSheets.spreadsheets.values.append({
-      auth,
-      spreadsheetId: SPREADSHEET_ID,
-      range: "PPMP!A:L",
-      valueInputOption: "USER_ENTERED",
-      resource: { values: ppmpRows },
+    
+    const response = await googleSheets.spreadsheets.values.get({ 
+      auth, spreadsheetId: SPREADSHEET_ID, range: "BudgetForm4!A:N" 
     });
-
-    res.status(200).json({ message: "Procurement shells batch-synchronized safely." });
-  } catch (error) {
-    console.error("Error appending procurement logs:", error);
-    res.status(500).json({ message: "Failed to execute bulk batch creation." });
-  }
-});
-
-app.post('/api/ppmp/update', async (req, res) => {
-  const { aipRefCode, updatedPlan } = req.body;
-  try {
-    const client = await auth.getClient();
-    const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "PPMP!A:L" });
-    const rows = response.data.values;
+    const rows = response.data.values || [];
 
     let targetRowIndex = -1;
     for (let i = 0; i < rows.length; i++) {
-      if (rows[i][0] === aipRefCode) {
-        targetRowIndex = i + 1;
+      if (rows[i][0] && originalRefCode && rows[i][0].toString().trim().toLowerCase() === originalRefCode.toString().trim().toLowerCase()) {
+        targetRowIndex = i + 1; 
         break;
       }
     }
 
-    if (targetRowIndex === -1) return res.status(404).json({ message: "Target procurement plan reference row not found." });
+    if (targetRowIndex === -1) {
+      return res.status(404).json({ message: `Target budget row reference [${originalRefCode}] could not be found.` });
+    }
 
-    const updatedRowValues = [[
-      aipRefCode,
-      updatedPlan.office,
-      updatedPlan.generalDescription,
-      updatedPlan.typeOfProject,
-      updatedPlan.preProcurementConference,
-      updatedPlan.startProcurementMonth,
-      updatedPlan.endProcurementMonth,
-      updatedPlan.expectedDeliveryMonth,
-      updatedPlan.sourceOfFunds,
-      updatedPlan.estimatedBudget,
-      JSON.stringify(updatedPlan.items || []),
+    const updatedRow = [
+      originalRefCode,
+      updatedEntry.office,
+      updatedEntry.programTitle,
+      updatedEntry.projectName,
+      updatedEntry.activityName,
+      updatedEntry.implementingOffice,
+      updatedEntry.performanceIndicator,
+      updatedEntry.targetBudgetYear,
+      updatedEntry.ps,
+      updatedEntry.mooe,
+      updatedEntry.co,
+      updatedEntry.total,
+      updatedEntry.includesProcurement,
       new Date().toLocaleString()
-    ]];
+    ];
 
     await googleSheets.spreadsheets.values.update({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: `PPMP!A${targetRowIndex}:L${targetRowIndex}`,
+      range: `BudgetForm4!A${targetRowIndex}:N${targetRowIndex}`,
       valueInputOption: "USER_ENTERED",
-      resource: { values: updatedRowValues }
+      resource: { values: [updatedRow] }
     });
 
-    res.status(200).json({ message: "Procurement plan specifications updated cleanly." });
+    res.status(200).json({ message: "Budget matrix coordinates updated successfully inside Google Sheets cells." });
   } catch (error) {
-    console.error("Update error inside PPMP log sheet:", error);
-    res.status(500).json({ message: "Failed to rewrite spreadsheet row parameters." });
+    console.error("Budget update error:", error);
+    res.status(500).json({ message: "Failed to modify database budget cell parameters." });
+  }
+});
+
+app.post('/api/budget/delete', async (req, res) => {
+  const { aipRefCode } = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+    
+    const response = await googleSheets.spreadsheets.values.get({ 
+      auth, spreadsheetId: SPREADSHEET_ID, range: "BudgetForm4!A:A" 
+    });
+    const rows = response.data.values || [];
+
+    let targetIndex = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] && rows[i][0].toString().trim().toLowerCase() === String(aipRefCode).trim().toLowerCase()) {
+        targetIndex = i; 
+        break;
+      }
+    }
+
+    if (targetIndex === -1) {
+      return res.status(404).json({ message: "Budget record row allocation reference context not found." });
+    }
+
+    const meta = await googleSheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetId = meta.data.sheets.find(s => s.properties.title === "BudgetForm4")?.properties.sheetId;
+
+    await googleSheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      resource: {
+        requests: [{
+          deleteDimension: {
+            range: { 
+              sheetId: sheetId, 
+              dimension: "ROWS", 
+              startIndex: targetIndex, 
+              endIndex: targetIndex + 1 
+            }
+          }
+        }]
+      }
+    });
+
+    res.status(200).json({ message: "Success! Row dropped and shifted up cleanly inside budget worksheet." });
+  } catch (error) {
+    console.error("Local Budget Delete Error:", error);
+    res.status(500).json({ message: "Failed to truncate and shift target budget cell row parameters." });
+  }
+});
+
+
+// ==========================================
+// RIGID FIXED ROW MATRIX PPMP CONTROLLERS
+// ==========================================
+app.post('/api/ppmp', async (req, res) => {
+  const body = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+
+    let rowsToAppend = [];
+
+    // AUTOMATED MATRIX BRANCHING: Dynamically shifts parser context based on incoming batch array loops vs single manual configs
+    if (body.entries && Array.isArray(body.entries)) {
+      rowsToAppend = body.entries.map(entry => [
+        entry.aipRefCode || '',                
+        entry.office || '',                    
+        entry.generalDescription || '',        
+        entry.typeOfProject || 'Goods',        
+        entry.preProcurementConference || 'No',
+        entry.startProcurementMonth || '—',   
+        entry.endProcurementMonth || '—',     
+        entry.expectedDeliveryMonth || '—',   
+        entry.sourceOfFunds || 'General Fund', 
+        entry.estimatedBudget || 0,            
+        JSON.stringify(entry.items || []),     
+        new Date().toLocaleString()            
+      ]);
+    } else {
+      const entry = body;
+      rowsToAppend = [[
+        entry.code || '',
+        entry.office || '',
+        entry.description || '',
+        entry.typeOfProject || 'Goods',
+        entry.preProcurementConference || 'No',
+        entry.startProcurementMonth || 'January',
+        entry.endProcurementMonth || 'December',
+        entry.expectedDeliveryMonth || 'December',
+        entry.sourceOfFunds || 'General Fund',
+        entry.estimatedBudget || 0,
+        JSON.stringify(entry.items || []),
+        new Date().toLocaleString()
+      ]];
+    }
+
+    await googleSheets.spreadsheets.values.append({
+      auth,
+      spreadsheetId: SPREADSHEET_ID,
+      range: "PPMP!A:L", 
+      valueInputOption: "USER_ENTERED",
+      resource: { values: rowsToAppend },
+    });
+
+    res.status(200).json({ message: "PPMP item(s) logged successfully!" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Internal server error." });
+  }
+});
+
+app.post('/api/ppmp/update', async (req, res) => {
+  const { originalCode, updatedRow } = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "PPMP!A:A" });
+    const rows = response.data.values || [];
+
+    let matchIndex = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] === originalCode) {
+        matchIndex = i + 1; 
+        break;
+      }
+    }
+    if (matchIndex === -1) return res.status(404).json({ message: "Target PPMP item pointer lost." });
+
+    const updatedDataPayload = [
+      originalCode,                                 
+      updatedRow.office,                            
+      updatedRow.generalDescription || '',          
+      updatedRow.typeOfProject || 'Goods',          
+      updatedRow.preProcurementConference || 'No',  
+      updatedRow.startProcurementMonth || 'January',
+      updatedRow.endProcurementMonth || 'December',  
+      updatedRow.expectedDeliveryMonth || 'December',
+      updatedRow.sourceOfFunds || 'General Fund',   
+      updatedRow.estimatedBudget || 0,              
+      JSON.stringify(updatedRow.items || []),       
+      new Date().toLocaleString()                   
+    ];
+
+    await googleSheets.spreadsheets.values.update({
+      auth, spreadsheetId: SPREADSHEET_ID, range: `PPMP!A${matchIndex}:L${matchIndex}`,
+      valueInputOption: "USER_ENTERED", resource: { values: [updatedDataPayload] }
+    });
+    res.status(200).json({ message: "PPMP item overwritten inside cells successfully." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update spreadsheet matrix cells." });
+  }
+});
+
+app.post('/api/ppmp/delete', async (req, res) => {
+  const { code } = req.body;
+  try {
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+    
+    const response = await googleSheets.spreadsheets.values.get({ 
+      auth, spreadsheetId: SPREADSHEET_ID, range: "PPMP!A:A" 
+    });
+    const rows = response.data.values || [];
+
+    let targetIndex = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] && rows[i][0].toString().trim().toLowerCase() === String(code).trim().toLowerCase()) {
+        targetIndex = i; 
+        break;
+      }
+    }
+
+    if (targetIndex === -1) {
+      return res.status(404).json({ message: "PPMP reference context not found." });
+    }
+
+    const meta = await googleSheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetId = meta.data.sheets.find(s => s.properties.title === "PPMP")?.properties.sheetId;
+
+    await googleSheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      resource: {
+        requests: [{
+          deleteDimension: {
+            range: { sheetId: sheetId, dimension: "ROWS", startIndex: targetIndex, endIndex: targetIndex + 1 }
+          }
+        }]
+      }
+    });
+
+    res.status(200).json({ message: "Success! Row deleted and shifted up cleanly." });
+  } catch (error) {
+    console.error("Local PPMP Delete Error:", error);
+    res.status(500).json({ message: "Failed to delete target PPMP cell row parameters." });
   }
 });
 
@@ -733,82 +1058,72 @@ app.get('/api/ppmp/:department', async (req, res) => {
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "PPMP!A:L" });
-    const rows = response.data.values;
 
-    if (!rows || rows.length <= 1) return res.status(200).json([]);
+    const response = await googleSheets.spreadsheets.values.get({
+      auth, spreadsheetId: SPREADSHEET_ID, range: "PPMP!A:L", 
+    });
 
-    const filteredEntries = rows.slice(1)
-      .filter(row => {
-        if (!row[1] || department.trim().toLowerCase() === 'all') return true;
-        return row[1].toString().trim().toLowerCase() === department.trim().toLowerCase();
-      })
-      .map((row, index) => {
+    const rows = response.data.values || [];
+    const cleanDept = String(department).trim().toLowerCase();
+
+    const filteredPpmp = rows.slice(1)
+      .filter(row => row && row[1] && row[1].toString().trim().toLowerCase() === cleanDept)
+      .map(row => {
         let parsedItems = [];
-        try { parsedItems = JSON.parse(row[10] || '[]'); } catch (e) { parsedItems = []; }
+        try {
+          if (row[10]) parsedItems = JSON.parse(row[10]);
+        } catch (e) { parsedItems = []; }
 
         return {
-          id: index,
-          aipRefCode: row[0] || '',
+          aipRefCode: row[0] || 'Uncoded',
           office: row[1] || '',
           generalDescription: row[2] || '',
           typeOfProject: row[3] || 'Goods',
           preProcurementConference: row[4] || 'No',
-          startProcurementMonth: row[5] || '',
-          endProcurementMonth: row[6] || '',
-          expectedDeliveryMonth: row[7] || '',
-          sourceOfFunds: row[8] || '',
+          startProcurementMonth: row[5] || '—',
+          endProcurementMonth: row[6] || '—',
+          expectedDeliveryMonth: row[7] || '—',
+          sourceOfFunds: row[8] || 'General Fund',
           estimatedBudget: cleanParseFloat(row[9]),
           items: parsedItems,
           timestamp: row[11] || ''
         };
       });
 
-    res.status(200).json(filteredEntries.reverse());
+    res.status(200).json(filteredPpmp.reverse());
   } catch (error) {
-    console.error("Error processing procurement database extraction arrays:", error);
-    res.status(500).json({ message: "Failed to map network data matrix stream fields." });
+    console.error(error);
+    res.status(500).json({ message: "Failed to read data from PPMP log tracking worksheet cells." });
   }
 });
 
 
 // ==========================================
-// NEW: ANNUAL PROCUREMENT PLAN (APP) ENDPOINTS
+// APP ENDPOINTS
 // ==========================================
 app.post('/api/app', async (req, res) => {
-  const entry = req.body;
+  const { appCode, office, procurementProgram, mof, sourceOfFunds, ps, mooe, co, total } = req.body;
+
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
-    const newAppRow = [[
-      entry.aipRefCode,              
-      entry.projectTitle,            
-      entry.endUserUnit,             
-      entry.modeOfProcurement,       
-      entry.earlyProcurementActivity,
-      entry.criteriaForBidEvaluation,
-      entry.startProcurementMonth,   
-      entry.endProcurementMonth,     
-      entry.sourceOfFunds,           
-      entry.approvedBudget,          
-      entry.procurementStrategyTools,
-      entry.remarks,                 
-      new Date().toLocaleString()    
-    ]];
+    const timestamp = new Date().toLocaleString();
 
     await googleSheets.spreadsheets.values.append({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "APP!A:M",
+      range: "APP!A:J",
       valueInputOption: "USER_ENTERED",
-      resource: { values: newAppRow },
+      resource: {
+        values: [[appCode, office, procurementProgram, mof, sourceOfFunds, ps, mooe, co, total, timestamp]],
+      },
     });
 
-    res.status(200).json({ message: "APP row logged successfully." });
+    res.status(201).json({ message: "APP item saved successfully!" });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Failed to log APP entry." });
+    res.status(500).json({ message: "Internal server error." });
   }
 });
 
@@ -816,56 +1131,57 @@ app.get('/api/app', async (req, res) => {
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "APP!A:M" });
-    const rows = response.data.values;
-    if (!rows || rows.length <= 1) return res.status(200).json([]);
 
-    const formattedApp = rows.slice(1).map((row, index) => ({
-      id: index,
-      aipRefCode: row[0] || '',
-      projectTitle: row[1] || '',
-      endUserUnit: row[2] || '',
-      modeOfProcurement: row[3] || '',
-      earlyProcurementActivity: row[4] || '',
-      criteriaForBidEvaluation: row[5] || '',
-      startProcurementMonth: row[6] || '',
-      endProcurementMonth: row[7] || '',
-      sourceOfFunds: row[8] || '',
-      approvedBudget: cleanParseFloat(row[9]),
-      procurementStrategyTools: row[10] || '',
-      remarks: row[11] || '',
-      timestamp: row[12] || ''
+    const getRows = await googleSheets.spreadsheets.values.get({
+      auth,
+      spreadsheetId: SPREADSHEET_ID,
+      range: "APP!A:J",
+    });
+
+    const rows = getRows.data.values || [];
+
+    const formattedApp = rows.slice(1).map(row => ({
+      appCode: row[0] || '',
+      office: row[1] || '',
+      procurementProgram: row[2] || '',
+      moof: row[3] || '',
+      sourceOfFunds: row[4] || '',
+      ps: cleanParseFloat(row[5]),
+      mooe: cleanParseFloat(row[6]),
+      co: cleanParseFloat(row[7]),
+      total: cleanParseFloat(row[8]),
+      timestamp: row[9] || ''
     }));
 
     res.status(200).json(formattedApp.reverse());
   } catch (error) {
-    res.status(500).json({ message: "Failed to retrieve APP ledger." });
+    console.error(error);
+    res.status(500).json({ message: "Failed to read data lines from Master APP aggregate worksheet cells log tracker." });
   }
 });
 
 
 // ==========================================
-// MASTER GLOBAL AGGREGATION DASHBOARD ENDPOINT 
+// DASHBOARD STATS AGGREGATION ENDPOINT
 // ==========================================
 app.get('/api/dashboard/stats/:department', async (req, res) => {
   const { department } = req.params;
+  const dClean = department ? department.trim().toLowerCase() : '';
+
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
-    const [ldipRes, aipRes, budgetRes, ppmpRes] = await Promise.all([
-      googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "LDIP!A:H" }),
-      googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "AIP!A:R" }),
-      googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "BudgetForm4!A:M" }),
-      googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "PPMP!A:L" })
-    ]);
+    const rangesToPull = ["LDIP!A:G", "AIP!A:N", "BudgetForm4!A:L", "PPMP!A:F"];
+    const batchDataResponse = await googleSheets.spreadsheets.values.batchGet({
+      spreadsheetId: SPREADSHEET_ID, ranges: rangesToPull
+    });
 
-    const ldipRows = ldipRes.data.values || [];
-    const aipRows = aipRes.data.values || [];
-    const budgetRows = budgetRes.data.values || [];
-    const ppmpRows = ppmpRes.data.values || [];
-
-    const dClean = department.trim().toLowerCase();
+    const valueRanges = batchDataResponse.data.valueRanges || [];
+    const ldipRows = valueRanges[0]?.values || [];
+    const aipRows = valueRanges[1]?.values || [];
+    const budgetRows = valueRanges[2]?.values || [];
+    const ppmpRows = valueRanges[3]?.values || [];
 
     const filteredLdip = ldipRows.slice(1).filter(r => !r[0] || dClean === 'all' || r[0].toString().trim().toLowerCase() === dClean);
     const ldipCount = filteredLdip.length;
@@ -876,13 +1192,13 @@ app.get('/api/dashboard/stats/:department', async (req, res) => {
     const aipTotal = filteredAip.reduce((acc, curr) => acc + cleanParseFloat(curr[13]), 0);
 
     const filteredBudget = budgetRows.slice(1).filter(r => !r[1] || dClean === 'all' || r[1].toString().trim().toLowerCase() === dClean);
-    const budgetTotal = filteredBudget.reduce((acc, curr) => acc + cleanParseFloat(curr[11]), 0);
+    const budgetTotal = budgetRows.slice(1).reduce((acc, curr) => acc + cleanParseFloat(curr[11]), 0);
     const budgetPs = filteredBudget.reduce((acc, curr) => acc + cleanParseFloat(curr[8]), 0);
     const budgetMooe = filteredBudget.reduce((acc, curr) => acc + cleanParseFloat(curr[9]), 0);
     const budgetCo = filteredBudget.reduce((acc, curr) => acc + cleanParseFloat(curr[10]), 0);
 
     const filteredPpmp = ppmpRows.slice(1).filter(r => !r[1] || dClean === 'all' || r[1].toString().trim().toLowerCase() === dClean);
-    const ppmpTotal = filteredPpmp.reduce((acc, curr) => acc + cleanParseFloat(curr[9]), 0);
+    const ppmpTotal = filteredPpmp.reduce((acc, curr) => acc + cleanParseFloat(curr[5]), 0);
 
     res.status(200).json({
       ldipCount, ldipTotal,
