@@ -2,8 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
 const bcrypt = require('bcrypt');
+const path = require('path');
 
-const app = express(); //  FIXED: Removed the rogue assignment typo
+const app = express(); 
 const PORT = 5000;
 
 // 1. Your Google Sheet ID
@@ -13,9 +14,9 @@ const SPREADSHEET_ID = "1-JzWpjp7srwoMJcEmJ7PCbrdCGu467pQYow2_YJteE0";
 app.use(cors());
 app.use(express.json());
 
-// 2. Set up the Google Auth connection using your downloaded credentials
+// 2. Set up the Google Auth connection using bulletproof paths
 const auth = new google.auth.GoogleAuth({
-  keyFile: "credentials.json", 
+  keyFile: path.join(__dirname, "credentials.json"), 
   scopes: "https://www.googleapis.com/auth/spreadsheets", 
 });
 
@@ -304,6 +305,109 @@ app.get('/api/ldip/:department', async (req, res) => {
     res.status(200).json(filteredEntries.reverse());
   } catch (error) {
     res.status(500).json({ message: "Failed to retrieve records from cloud ledger." });
+  }
+});
+
+// CORE ROUTE: GENERATES RIGID FORMAT [Office Code]-[Program].[Project].[Activity] CODES FOR ALL ROWS
+app.post('/api/ldip/import', async (req, res) => {
+  const { office, rows } = req.body;
+  try {
+    if (!rows || !Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ message: "No data rows detected in the import package." });
+    }
+
+    const client = await auth.getClient();
+    const googleSheets = google.sheets({ version: "v4", auth: client });
+
+    // --- STEP 1: POPULATE GRANULAR ACTIVITIES TO THE LIVE AIP SHEET (AIP!A:R) ---
+    const aipRange = 'AIP!A:R';
+    const aipRowsToAppend = rows.map(row => {
+      // EXPLICIT INSTRUCTION 1 & 2: Combines the full Office Code matrix strictly from row payload variables
+      const masterOfficePrefix = row.officeCode || '3000-000-3-3-11';
+      const generatedRefCode = `${masterOfficePrefix}-${row.programId || '0'}.${row.projectId || '0'}.${row.activityId || '0'}`;
+
+      return [
+        generatedRefCode,
+        row.office || office || '', 
+        row.program || '',
+        row.project || '',
+        row.activities || 'N/A (Standalone Project)',
+        row.office || office || '',
+        row.startingDate || '',
+        row.completionDate || '',
+        row.expectedOutputs || '',
+        row.fundingSource || '',
+        row.ps || 0,
+        row.mooe || 0,
+        row.co || 0,
+        row.total || 0,
+        row.climateAdaptation || 0,
+        row.climateMitigation || 0,
+        row.ccTypologyCode || '',
+        new Date().toLocaleString()
+      ];
+    });
+
+    await googleSheets.spreadsheets.values.append({
+      auth,
+      spreadsheetId: SPREADSHEET_ID,
+      range: aipRange,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: aipRowsToAppend },
+    });
+
+    // --- STEP 2: AGGREGATE UNIQUE MAIN PROGRAM SLOTS TO LIVE LDIP SHEET (LDIP!A:H) ---
+    const ldipCheck = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "LDIP!A:H" });
+    const existingLdipRows = ldipCheck.data.values || [];
+    const existingTitles = existingLdipRows.slice(1).map(r => r[3] ? r[3].toString().trim().toLowerCase() : '');
+
+    const programAggregationMap = {};
+    rows.forEach(row => {
+      const titleKey = row.program || 'Untitled Program';
+      if (!programAggregationMap[titleKey]) {
+        programAggregationMap[titleKey] = {
+          office: row.office || office || '',
+          sectorCode: row.sectorCode || '0000',
+          sectorName: row.sectorName || 'Unassigned',
+          title: titleKey,
+          description: `Bulk Spreadsheet Imported Allotment Package.`,
+          accumulatedBudget: 0
+        };
+      }
+      programAggregationMap[titleKey].accumulatedBudget += parseFloat(row.total) || 0;
+    });
+
+    const ldipRowsToAppend = [];
+    Object.values(programAggregationMap).forEach(prog => {
+      if (!existingTitles.includes(prog.title.trim().toLowerCase())) {
+        const compiledYears = '2027, 2028, 2029';
+        ldipRowsToAppend.push([
+          prog.office, 
+          prog.sectorCode,
+          prog.sectorName,
+          prog.title,
+          prog.description,
+          compiledYears,
+          prog.accumulatedBudget,
+          new Date().toLocaleString()
+        ]);
+      }
+    });
+
+    if (ldipRowsToAppend.length > 0) {
+      await googleSheets.spreadsheets.values.append({
+        auth,
+        spreadsheetId: SPREADSHEET_ID,
+        range: "LDIP!A:H",
+        valueInputOption: "USER_ENTERED",
+        resource: { values: ldipRowsToAppend },
+      });
+    }
+
+    res.status(200).json({ message: "Successfully executed dual matrix sync parameters." });
+  } catch (error) {
+    console.error("Critical error encountered during batch Excel parsing:", error);
+    res.status(500).json({ message: "Internal server error syncing bulk dataset to Google ledger." });
   }
 });
 
@@ -793,5 +897,5 @@ app.get('/api/dashboard/stats/:department', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('Server is listening on http://localhost:5000');
+  console.log('Server is listening on https://municipal-budget-backend.onrender.com');
 });
