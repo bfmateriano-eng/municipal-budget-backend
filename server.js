@@ -3,6 +3,7 @@ const cors = require('cors');
 const { google } = require('googleapis');
 const bcrypt = require('bcrypt');
 const path = require('path');
+const fs = require('fs'); // Added to resolve Render secret path variations safely
 
 const app = express(); 
 const PORT = 5000;
@@ -14,10 +15,16 @@ const SPREADSHEET_ID = "1-JzWpjp7srwoMJcEmJ7PCbrdCGu467pQYow2_YJteE0";
 app.use(cors());
 app.use(express.json());
 
+// Defensive path lookup to handle local subfolder execution vs Render root secret file injection
+let credentialsPath = path.join(__dirname, "credentials.json");
+if (!fs.existsSync(credentialsPath) && fs.existsSync(path.join(process.cwd(), "credentials.json"))) {
+  credentialsPath = path.join(process.cwd(), "credentials.json");
+}
+
 // 2. Set up the Google Auth connection using bulletproof paths
 const auth = new google.auth.GoogleAuth({
-  keyFile: path.join(__dirname, "credentials.json"), 
-  scopes: "https://www.googleapis.com/auth/spreadsheets", 
+  keyFile: credentialsPath, 
+  scopes: "[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)", 
 });
 
 // SAFE UTILITY: Strips out Google Sheets formatting commas before parsing to prevent number truncation
@@ -37,7 +44,9 @@ app.get('/', (req, res) => {
 // REGISTRATION ENDPOINT (8-COLUMN COMPLIANT SCHEMA)
 // ==========================================
 app.post('/api/register', async (req, res) => {
-  const { username, password, nameOfUser, userType, department, contactNumber } = req.body;
+  // Defensive fallbacks to accept either username or email property variations safely
+  const username = req.body.username || req.body.email;
+  const { password, nameOfUser, userType, department, contactNumber } = req.body;
 
   try {
     const client = await auth.getClient();
@@ -92,7 +101,9 @@ app.post('/api/register', async (req, res) => {
 // LOGIN ENDPOINT (BOUNDED RANGE SAFETY CHECK)
 // ==========================================
 app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
+  // Defensive fallbacks to accept either username or email property variations safely
+  const username = req.body.username || req.body.email;
+  const { password } = req.body;
 
   try {
     const client = await auth.getClient();
@@ -698,12 +709,7 @@ app.post('/api/aip/delete', async (req, res) => {
       resource: {
         requests: [{
           deleteDimension: {
-            range: { 
-              sheetId: sheetId, 
-              dimension: "ROWS", 
-              startIndex: targetIndex, 
-              endIndex: targetIndex + 1 
-            }
+            range: { sheetId: sheetId, dimension: "ROWS", startIndex: targetIndex, endIndex: targetIndex + 1 }
           }
         }]
       }
@@ -748,7 +754,7 @@ app.post('/api/budget', async (req, res) => {
       spreadsheetId: SPREADSHEET_ID,
       range: "BudgetForm4!A:N",
       valueInputOption: "USER_ENTERED",
-      resource: { values: newBudgetRow },
+      resource: { values: [newBudgetRow] }
     });
 
     res.status(201).json({ message: "Budget allocation logged successfully!" });
@@ -1213,5 +1219,5 @@ app.get('/api/dashboard/stats/:department', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('Server is listening on https://municipal-budget-backend.onrender.com');
+  console.log('Server is listening on [https://municipal-budget-backend.onrender.com](https://municipal-budget-backend.onrender.com)');
 });
