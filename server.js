@@ -24,7 +24,7 @@ if (!fs.existsSync(credentialsPath) && fs.existsSync(path.join(process.cwd(), "c
 // 2. Set up the Google Auth connection using bulletproof paths
 const auth = new google.auth.GoogleAuth({
   keyFile: credentialsPath, 
-  scopes: "[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)", 
+  scopes: "https://www.googleapis.com/auth/spreadsheets", 
 });
 
 // SAFE UTILITY: Strips out Google Sheets formatting commas before parsing to prevent number truncation
@@ -41,7 +41,7 @@ app.get('/', (req, res) => {
 
 
 // ==========================================
-// REGISTRATION ENDPOINT (8-COLUMN COMPLIANT SCHEMA)
+// REGISTRATION ENDPOINT (9-COLUMN COMPLIANT SCHEMA)
 // ==========================================
 app.post('/api/register', async (req, res) => {
   // Defensive fallbacks to accept either username or email property variations safely
@@ -52,11 +52,11 @@ app.post('/api/register', async (req, res) => {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
-    // Query column A specifically to check for duplicates safely
+    // Query column A specifically to check for duplicates safely in Sheet1
     const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Users!A:A",
+      range: "Sheet1!A:A",
     });
 
     const rows = getRows.data.values || [];
@@ -69,22 +69,23 @@ app.post('/api/register', async (req, res) => {
     // Hash the password cleanly via bcrypt
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Save user to the "Users" sheet using your exact 8-column layout arrangement order
+    // Save user to "Sheet1" using your exact 9-column header layout arrangement order
     const newUserRecordRow = [[
-      username,                   // Col A: Email Address
+      username,                   // Col A: Email
       hashedPassword,             // Col B: Password
       nameOfUser || '',           // Col C: Name of User
-      userType || '',             // Col D: Type of User
-      department || '',           // Col E: Department/Office
-      contactNumber || '',        // Col F: Contact Number
-      new Date().toLocaleString(),// Col G: Timestamp
-      'Active'                    // Col H: Status
+      userType || '',             // Col D: User Type
+      department || '',           // Col E: Department
+      nameOfUser || '',           // Col F: Name of End User (Automatically defaults to Name of User)
+      contactNumber || '',        // Col G: Contact Number
+      new Date().toLocaleString(),// Col H: Timestamp
+      'Active'                    // Col I: Status
     ]];
 
     await googleSheets.spreadsheets.values.append({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Users!A:E", // Appending to A:E automatically expands row widths safely
+      range: "Sheet1!A:I", // Appending across all 9 data columns cleanly
       valueInputOption: "USER_ENTERED",
       resource: { values: newUserRecordRow },
     });
@@ -109,11 +110,11 @@ app.post('/api/login', async (req, res) => {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
-    // Fetch bounding columns A:E safely to guarantee execution independent of grid widths
+    // Fetch bounding columns A:E safely from Sheet1 to guarantee execution independent of grid widths
     const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Users!A:E",
+      range: "Sheet1!A:E",
     });
 
     const rows = getRows.data.values || [];
@@ -162,7 +163,7 @@ app.get('/api/users', async (req, res) => {
     const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Users!A:E",
+      range: "Sheet1!A:E",
     });
 
     const rows = getRows.data.values || [];
@@ -193,7 +194,7 @@ app.post('/api/users/update', async (req, res) => {
     const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Users!A:A",
+      range: "Sheet1!A:A",
     });
     const rows = getRows.data.values || [];
     
@@ -218,7 +219,7 @@ app.post('/api/users/update', async (req, res) => {
 
     await googleSheets.spreadsheets.values.update({
       auth, spreadsheetId: SPREADSHEET_ID,
-      range: `Users!A${sheetTargetLineIndex}:E${sheetTargetLineIndex}`,
+      range: `Sheet1!A${sheetTargetLineIndex}:E${sheetTargetLineIndex}`,
       valueInputOption: "USER_ENTERED",
       resource: { values: [cellValuePayload] }
     });
@@ -237,7 +238,7 @@ app.post('/api/users/delete', async (req, res) => {
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
     const getRows = await googleSheets.spreadsheets.values.get({
-      auth, spreadsheetId: SPREADSHEET_ID, range: "Users!A:A"
+      auth, spreadsheetId: SPREADSHEET_ID, range: "Sheet1!A:A"
     });
     const rows = getRows.data.values || [];
 
@@ -252,7 +253,7 @@ app.post('/api/users/delete', async (req, res) => {
     if(targetDeleteLineIndex === -1) return res.status(404).json({ message: "Account context pointer not found." });
 
     const meta = await googleSheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
-    const sheetId = meta.data.sheets.find(s => s.properties.title === "Users")?.properties.sheetId;
+    const sheetId = meta.data.sheets.find(s => s.properties.title === "Sheet1")?.properties.sheetId;
 
     await googleSheets.spreadsheets.batchUpdate({
       spreadsheetId: SPREADSHEET_ID,
@@ -666,7 +667,7 @@ app.post('/api/aip/update', async (req, res) => {
 
     await googleSheets.spreadsheets.values.update({
       auth, spreadsheetId: SPREADSHEET_ID, range: `AIP!A${targetRowIndex}:R${targetRowIndex}`,
-      valueInputOption: "USER_ENTERED", resource: { values: updatedValues }
+      valueInputOption: "USER_ENTERED", resource: { values: [updatedValues] }
     });
 
     res.status(200).json({ message: "AIP entry updated successfully." });
@@ -709,7 +710,12 @@ app.post('/api/aip/delete', async (req, res) => {
       resource: {
         requests: [{
           deleteDimension: {
-            range: { sheetId: sheetId, dimension: "ROWS", startIndex: targetIndex, endIndex: targetIndex + 1 }
+            range: { 
+              sheetId: sheetId, 
+              dimension: "ROWS", 
+              startIndex: targetIndex, 
+              endIndex: targetIndex + 1 
+            }
           }
         }]
       }
@@ -754,7 +760,7 @@ app.post('/api/budget', async (req, res) => {
       spreadsheetId: SPREADSHEET_ID,
       range: "BudgetForm4!A:N",
       valueInputOption: "USER_ENTERED",
-      resource: { values: [newBudgetRow] }
+      resource: { values: [newBudgetRow], },
     });
 
     res.status(201).json({ message: "Budget allocation logged successfully!" });
@@ -1219,5 +1225,5 @@ app.get('/api/dashboard/stats/:department', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('Server is listening on [https://municipal-budget-backend.onrender.com](https://municipal-budget-backend.onrender.com)');
+  console.log('Server is listening on https://municipal-budget-backend.onrender.com');
 });
