@@ -199,9 +199,12 @@ app.get('/api/users', async (req, res) => {
 
 // 2. FORCE OVERRIDE UPDATE EXECUTING ON USER ACCOUNT
 app.post('/api/users/update', async (req, res) => {
-  // Expanded fallback sequence to process input values sent under originalUsername, username, or email keys securely
-  const originalUsername = req.body.originalUsername || req.body.username || req.body.email;
+  // Advanced Payload Intercept: Unpacks properties regardless of root or nested frontend object casing variations
+  const originalUsername = req.body.originalUsername || req.body.username || req.body.email || 
+                           (req.body.updatedUser && (req.body.updatedUser.username || req.body.updatedUser.email));
+  
   const updatedUser = req.body.updatedUser || req.body;
+  const statusUpdate = req.body.status || updatedUser.status;
 
   try {
     const client = await auth.getClient();
@@ -223,11 +226,9 @@ app.post('/api/users/update', async (req, res) => {
       }
     }
 
-    // Detailed debug response parameters added to simplify payload checking inside error states
     if (sheetTargetLineIndex === -1) {
       return res.status(404).json({ 
-        message: `Target account registry item context lost. No row entry matches identifier: [${originalUsername}].`,
-        debugContext: { receivedKey: originalUsername || null, totalRowsScanned: rows.length }
+        message: `Target identifier [${originalUsername}] was not found inside Column A of Sheet1.`
       });
     }
 
@@ -235,15 +236,15 @@ app.post('/api/users/update', async (req, res) => {
 
     // Compile values block array matching schema adjustments across all 9 data columns securely
     const cellValuePayload = [
-      updatedUser.username || existingRow[0] || '', 
-      updatedUser.password || existingRow[1] || '', 
-      updatedUser.nameOfUser || existingRow[2] || '',
-      updatedUser.userType || existingRow[3] || '',
-      updatedUser.department || existingRow[4] || '',
-      updatedUser.nameOfUser || existingRow[5] || '',
-      updatedUser.contactNumber || existingRow[6] || '',
-      existingRow[7] || new Date().toLocaleString(),
-      updatedUser.status || existingRow[8] || 'Pending' // Updates Column I cleanly
+      originalUsername || existingRow[0] || '',                  // Col A: Email
+      updatedUser.password || existingRow[1] || '',               // Col B: Password Hash
+      updatedUser.nameOfUser || existingRow[2] || '',             // Col C: Name of User
+      updatedUser.userType || existingRow[3] || '',               // Col D: User Type
+      updatedUser.department || existingRow[4] || '',             // Col E: Department Office
+      updatedUser.nameOfUser || existingRow[5] || existingRow[2] || '', // Col F: Name of End User
+      updatedUser.contactNumber || existingRow[6] || '',         // Col G: Contact Number
+      existingRow[7] || new Date().toLocaleString(),               // Col H: Timestamp
+      statusUpdate || existingRow[8] || 'Pending'                 // Col I: Overwrites target status cells flawlessly
     ];
 
     await googleSheets.spreadsheets.values.update({
@@ -785,7 +786,7 @@ app.post('/api/budget', async (req, res) => {
       spreadsheetId: SPREADSHEET_ID,
       range: "BudgetForm4!A:N",
       valueInputOption: "USER_ENTERED",
-      resource: { values: [newBudgetRow], },
+      resource: { values: [newBudgetRow] },
     });
 
     res.status(201).json({ message: "Budget allocation logged successfully!" });
@@ -993,7 +994,7 @@ app.post('/api/ppmp', async (req, res) => {
       spreadsheetId: SPREADSHEET_ID,
       range: "PPMP!A:L", 
       valueInputOption: "USER_ENTERED",
-      resource: { values: [rowsToAppend] },
+      resource: { values: rowsToAppend },
     });
 
     res.status(200).json({ message: "PPMP item(s) logged successfully!" });
