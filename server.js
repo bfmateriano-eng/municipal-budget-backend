@@ -60,7 +60,8 @@ app.post('/api/register', async (req, res) => {
     });
 
     const rows = getRows.data.values || [];
-    const userExists = rows.some(row => row[0] && row[0].toString().trim().toLowerCase() === String(username).trim().toLowerCase());
+    const dataRows = rows.slice(1);
+    const userExists = dataRows.some(row => row[0] && row[0].toString().trim().toLowerCase() === String(username).trim().toLowerCase());
 
     if (userExists) {
       return res.status(400).json({ message: "Email address username already exists in portal registry." });
@@ -79,7 +80,7 @@ app.post('/api/register', async (req, res) => {
       nameOfUser || '',           // Col F: Name of End User (Automatically defaults to Name of User)
       contactNumber || '',        // Col G: Contact Number
       new Date().toLocaleString(),// Col H: Timestamp
-      'Active'                    // Col I: Status
+      'Pending'                   // Col I: Status (Stamps as Pending for Admin Approval Gateway Desk)
     ]];
 
     await googleSheets.spreadsheets.values.append({
@@ -110,22 +111,28 @@ app.post('/api/login', async (req, res) => {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
-    // Fetch bounding columns A:E safely from Sheet1 to guarantee execution independent of grid widths
+    // Fetch bounding columns A:I safely from Sheet1 to read structural status parameters
     const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Sheet1!A:E",
+      range: "Sheet1!A:I",
     });
 
     const rows = getRows.data.values || [];
-    const userRow = rows.find(row => row[0] && row[0].toString().trim().toLowerCase() === String(username).trim().toLowerCase());
+    const dataRows = rows.slice(1);
+    const userRow = dataRows.find(row => row[0] && row[0].toString().trim().toLowerCase() === String(username).trim().toLowerCase());
 
     if (!userRow) {
       return res.status(400).json({ message: "Invalid username or password configuration." });
     }
 
-    // De-structure baseline parameters from rows securely
-    const [storedUsername, storedHashedPassword, nameOfUser, userType, department] = userRow;
+    // De-structure baseline parameters from rows securely including Column I status indicators
+    const [storedUsername, storedHashedPassword, nameOfUser, userType, department, , contactNumber, , status] = userRow;
+
+    // Safety Intercept Check: Prevent bcrypt from crashing on missing, empty, or unencrypted cell entries
+    if (!storedHashedPassword || typeof storedHashedPassword !== 'string' || !storedHashedPassword.startsWith('$2')) {
+      return res.status(400).json({ message: "Account profile found, but password hash structure inside column grid is blank or corrupt." });
+    }
 
     // Compare passwords securely using bcrypt engine hashes
     const isPasswordValid = await bcrypt.compare(password, storedHashedPassword);
@@ -141,7 +148,9 @@ app.post('/api/login', async (req, res) => {
         username: storedUsername, 
         department, 
         userType,
-        nameOfUser
+        nameOfUser,
+        contactNumber: contactNumber || '',
+        status: status || 'Pending'
       },
     });
   } catch (error) {
@@ -160,10 +169,11 @@ app.get('/api/users', async (req, res) => {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
+    // Expanded range to A:I to collect Status parameters safely
     const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Sheet1!A:E",
+      range: "Sheet1!A:I",
     });
 
     const rows = getRows.data.values || [];
@@ -174,7 +184,10 @@ app.get('/api/users', async (req, res) => {
       username: row[0] || '',
       nameOfUser: row[2] || '',
       userType: row[3] || '',
-      department: row[4] || ''
+      department: row[4] || '',
+      contactNumber: row[6] || '',
+      timestamp: row[7] || '',
+      status: row[8] || 'Pending' // Column I maps directly here
     }));
 
     res.status(200).json(formattedUsers);
@@ -194,7 +207,7 @@ app.post('/api/users/update', async (req, res) => {
     const getRows = await googleSheets.spreadsheets.values.get({
       auth,
       spreadsheetId: SPREADSHEET_ID,
-      range: "Sheet1!A:A",
+      range: "Sheet1!A:I",
     });
     const rows = getRows.data.values || [];
     
@@ -208,18 +221,24 @@ app.post('/api/users/update', async (req, res) => {
 
     if(sheetTargetLineIndex === -1) return res.status(404).json({ message: "Target account registry item context lost." });
 
-    // Compile values block array matching schema adjustments
+    const existingRow = rows[sheetTargetLineIndex - 1];
+
+    // Compile values block array matching schema adjustments across all 9 data columns securely
     const cellValuePayload = [
-      updatedUser.username, 
-      updatedUser.password || '', 
-      updatedUser.nameOfUser || '',
-      updatedUser.userType || '',
-      updatedUser.department || ''
+      updatedUser.username || existingRow[0], 
+      updatedUser.password || existingRow[1], 
+      updatedUser.nameOfUser || existingRow[2],
+      updatedUser.userType || existingRow[3],
+      updatedUser.department || existingRow[4],
+      updatedUser.nameOfUser || existingRow[5],
+      updatedUser.contactNumber || existingRow[6],
+      existingRow[7] || new Date().toLocaleString(),
+      updatedUser.status || existingRow[8] || 'Pending' // Updates Column I cleanly
     ];
 
     await googleSheets.spreadsheets.values.update({
       auth, spreadsheetId: SPREADSHEET_ID,
-      range: `Sheet1!A${sheetTargetLineIndex}:E${sheetTargetLineIndex}`,
+      range: `Sheet1!A${sheetTargetLineIndex}:I${sheetTargetLineIndex}`, // Target complete row width
       valueInputOption: "USER_ENTERED",
       resource: { values: [cellValuePayload] }
     });
@@ -710,12 +729,7 @@ app.post('/api/aip/delete', async (req, res) => {
       resource: {
         requests: [{
           deleteDimension: {
-            range: { 
-              sheetId: sheetId, 
-              dimension: "ROWS", 
-              startIndex: targetIndex, 
-              endIndex: targetIndex + 1 
-            }
+            range: { sheetId: sheetId, dimension: "ROWS", startIndex: targetIndex, endIndex: targetIndex + 1 }
           }
         }]
       }
@@ -1079,7 +1093,11 @@ app.get('/api/ppmp/:department', async (req, res) => {
     const cleanDept = String(department).trim().toLowerCase();
 
     const filteredPpmp = rows.slice(1)
-      .filter(row => row && row[1] && row[1].toString().trim().toLowerCase() === cleanDept)
+      .filter(row => {
+        if (!row || !row[1]) return false;
+        if (cleanDept === 'all') return true; // Safety override bypass to support BAC Secretary consolidated metrics view loops
+        return row[1].toString().trim().toLowerCase() === cleanDept;
+      })
       .map(row => {
         let parsedItems = [];
         try {
