@@ -199,7 +199,10 @@ app.get('/api/users', async (req, res) => {
 
 // 2. FORCE OVERRIDE UPDATE EXECUTING ON USER ACCOUNT
 app.post('/api/users/update', async (req, res) => {
-  const { originalUsername, updatedUser } = req.body;
+  // Defensive fallbacks to accept either originalUsername or username payload keys safely
+  const originalUsername = req.body.originalUsername || req.body.username;
+  const updatedUser = req.body.updatedUser || req.body;
+
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
@@ -211,9 +214,10 @@ app.post('/api/users/update', async (req, res) => {
     });
     const rows = getRows.data.values || [];
     
+    // Robust case-insensitive comparison loop to neutralize whitespace variances
     let sheetTargetLineIndex = -1;
-    for(let i=0; i<rows.length; i++) {
-      if(rows[i][0] === originalUsername) {
+    for(let i = 0; i < rows.length; i++) {
+      if (rows[i][0] && originalUsername && rows[i][0].toString().trim().toLowerCase() === originalUsername.toString().trim().toLowerCase()) {
         sheetTargetLineIndex = i + 1; 
         break;
       }
@@ -225,13 +229,13 @@ app.post('/api/users/update', async (req, res) => {
 
     // Compile values block array matching schema adjustments across all 9 data columns securely
     const cellValuePayload = [
-      updatedUser.username || existingRow[0], 
-      updatedUser.password || existingRow[1], 
-      updatedUser.nameOfUser || existingRow[2],
-      updatedUser.userType || existingRow[3],
-      updatedUser.department || existingRow[4],
-      updatedUser.nameOfUser || existingRow[5],
-      updatedUser.contactNumber || existingRow[6],
+      updatedUser.username || existingRow[0] || '', 
+      updatedUser.password || existingRow[1] || '', 
+      updatedUser.nameOfUser || existingRow[2] || '',
+      updatedUser.userType || existingRow[3] || '',
+      updatedUser.department || existingRow[4] || '',
+      updatedUser.nameOfUser || existingRow[5] || '',
+      updatedUser.contactNumber || existingRow[6] || '',
       existingRow[7] || new Date().toLocaleString(),
       updatedUser.status || existingRow[8] || 'Pending' // Updates Column I cleanly
     ];
@@ -245,6 +249,7 @@ app.post('/api/users/update', async (req, res) => {
 
     res.status(200).json({ message: "Account profile successfully overwritten inside data stream mapping registry." });
   } catch (error) {
+    console.error("User status modification crash error details:", error);
     res.status(500).json({ message: "Failed to push network write action to user record sheet." });
   }
 });
