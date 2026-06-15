@@ -199,8 +199,8 @@ app.get('/api/users', async (req, res) => {
 
 // 2. FORCE OVERRIDE UPDATE EXECUTING ON USER ACCOUNT
 app.post('/api/users/update', async (req, res) => {
-  // Defensive fallbacks to accept either originalUsername or username payload keys safely
-  const originalUsername = req.body.originalUsername || req.body.username;
+  // Expanded fallback sequence to process input values sent under originalUsername, username, or email keys securely
+  const originalUsername = req.body.originalUsername || req.body.username || req.body.email;
   const updatedUser = req.body.updatedUser || req.body;
 
   try {
@@ -223,7 +223,13 @@ app.post('/api/users/update', async (req, res) => {
       }
     }
 
-    if(sheetTargetLineIndex === -1) return res.status(404).json({ message: "Target account registry item context lost." });
+    // Detailed debug response parameters added to simplify payload checking inside error states
+    if (sheetTargetLineIndex === -1) {
+      return res.status(404).json({ 
+        message: `Target account registry item context lost. No row entry matches identifier: [${originalUsername}].`,
+        debugContext: { receivedKey: originalUsername || null, totalRowsScanned: rows.length }
+      });
+    }
 
     const existingRow = rows[sheetTargetLineIndex - 1];
 
@@ -740,7 +746,7 @@ app.post('/api/aip/delete', async (req, res) => {
       }
     });
 
-    res.status(200).json({ message: "Success! Row deleted and shifted up locally." });
+    res.status(200).json({ message: "Success! Row deleted and shifted up cleanly." });
   } catch (error) {
     console.error("Local AIP Delete Error Details:", error);
     res.status(500).json({ message: "Failed to clear and shift target AIP spreadsheet row locally." });
@@ -987,7 +993,7 @@ app.post('/api/ppmp', async (req, res) => {
       spreadsheetId: SPREADSHEET_ID,
       range: "PPMP!A:L", 
       valueInputOption: "USER_ENTERED",
-      resource: { values: rowsToAppend },
+      resource: { values: [rowsToAppend] },
     });
 
     res.status(200).json({ message: "PPMP item(s) logged successfully!" });
