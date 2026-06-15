@@ -316,6 +316,7 @@ app.post('/api/ldip', async (req, res) => {
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
     const timestamp = new Date().toLocaleString();
+    const targetsArray = Array.isArray(targets) ? targets : (targets ? [targets] : []);
 
     // Append entry to "LDIP" sheet
     await googleSheets.spreadsheets.values.append({
@@ -324,7 +325,7 @@ app.post('/api/ldip', async (req, res) => {
       range: "LDIP!A:H",
       valueInputOption: "USER_ENTERED",
       resource: {
-        values: [[office, sectorCode, sectorName, title, description, targets.join(', '), budget, timestamp]],
+        values: [[office, sectorCode, sectorName, title, description, targetsArray.join(', '), budget, timestamp]],
       },
     });
 
@@ -395,13 +396,15 @@ app.post('/api/ldip/update', async (req, res) => {
 
     if (targetRowIndex === -1) return res.status(404).json({ message: "Target LDIP record layout not found." });
 
+    const updatedTargetsArray = Array.isArray(updatedEntry.targets) ? updatedEntry.targets : (updatedEntry.targets ? [updatedEntry.targets] : []);
+
     const updatedRow = [
       updatedEntry.office,
       updatedEntry.sectorCode,
       updatedEntry.sectorName,
       updatedEntry.title,
       updatedEntry.description,
-      updatedEntry.targets.join(', '),
+      updatedTargetsArray.join(', '),
       updatedEntry.budget,
       originalTimestamp 
     ];
@@ -765,19 +768,19 @@ app.post('/api/budget', async (req, res) => {
     const googleSheets = google.sheets({ version: "v4", auth: client });
 
     const newBudgetRow = [[
-      entry.aipRefCode,           
-      entry.office,               
-      entry.programTitle,         
-      entry.projectName,          
-      entry.activityName,         
-      entry.implementingOffice,   
-      entry.performanceIndicator, 
-      entry.targetBudgetYear,     
-      entry.ps,                   
-      entry.mooe,                 
-      entry.co,                   
-      entry.total,                
-      entry.includesProcurement,  
+      entry.aipRefCode || '',           
+      entry.office || '',               
+      entry.programTitle || '',         
+      entry.projectName || '',          
+      entry.activityName || '',         
+      entry.implementingOffice || '',   
+      entry.performanceIndicator || '', 
+      entry.targetBudgetYear || '',     
+      entry.ps || 0,                   
+      entry.mooe || 0,                 
+      entry.co || 0,                   
+      entry.total || 0,                
+      entry.includesProcurement || 'No',  
       new Date().toLocaleString() 
     ]];
 
@@ -786,12 +789,12 @@ app.post('/api/budget', async (req, res) => {
       spreadsheetId: SPREADSHEET_ID,
       range: "BudgetForm4!A:N",
       valueInputOption: "USER_ENTERED",
-      resource: { values: [newBudgetRow] },
+      resource: { values: newBudgetRow }, // FIXED: Passed directly as a 2D array matrix to drop the 3D nesting trap
     });
 
     res.status(201).json({ message: "Budget allocation logged successfully!" });
   } catch (error) {
-    console.error(error);
+    console.error("Budget allocation entry error layout context:", error);
     res.status(500).json({ message: "Internal server error." });
   }
 });
@@ -801,7 +804,7 @@ app.get('/api/budget/:department', async (req, res) => {
   try {
     const client = await auth.getClient();
     const googleSheets = google.sheets({ version: "v4", auth: client });
-    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "BudgetForm4!A:M" });
+    const response = await googleSheets.spreadsheets.values.get({ auth, spreadsheetId: SPREADSHEET_ID, range: "BudgetForm4!A:N" });
     const rows = response.data.values;
 
     if (!rows || rows.length <= 1) return res.status(200).json([]);
@@ -958,9 +961,9 @@ app.post('/api/ppmp', async (req, res) => {
     // AUTOMATED MATRIX BRANCHING: Dynamically shifts parser context based on incoming batch array loops vs single manual configs
     if (body.entries && Array.isArray(body.entries)) {
       rowsToAppend = body.entries.map(entry => [
-        entry.aipRefCode || '',                
+        entry.aipRefCode || entry.code || '',                
         entry.office || '',                    
-        entry.generalDescription || '',        
+        entry.generalDescription || entry.description || '',        
         entry.typeOfProject || 'Goods',        
         entry.preProcurementConference || 'No',
         entry.startProcurementMonth || '—',   
@@ -974,9 +977,9 @@ app.post('/api/ppmp', async (req, res) => {
     } else {
       const entry = body;
       rowsToAppend = [[
-        entry.code || '',
+        entry.aipRefCode || entry.code || '',
         entry.office || '',
-        entry.description || '',
+        entry.generalDescription || entry.description || '',
         entry.typeOfProject || 'Goods',
         entry.preProcurementConference || 'No',
         entry.startProcurementMonth || 'January',
@@ -999,7 +1002,7 @@ app.post('/api/ppmp', async (req, res) => {
 
     res.status(200).json({ message: "PPMP item(s) logged successfully!" });
   } catch (error) {
-    console.error(error);
+    console.error("PPMP form submission server exception loop catch:", error);
     res.status(500).json({ message: "Internal server error." });
   }
 });
@@ -1024,7 +1027,7 @@ app.post('/api/ppmp/update', async (req, res) => {
     const updatedDataPayload = [
       originalCode,                                 
       updatedRow.office,                            
-      updatedRow.generalDescription || '',          
+      updatedRow.generalDescription || updatedRow.description || '',          
       updatedRow.typeOfProject || 'Goods',          
       updatedRow.preProcurementConference || 'No',  
       updatedRow.startProcurementMonth || 'January',
